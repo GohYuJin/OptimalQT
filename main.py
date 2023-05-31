@@ -56,7 +56,23 @@ with torch.no_grad():
     print(acc_of_original, acc_of_compressed)
     # predictied_class = return_class_name(predictions)[0]
     
-train_dataset = torchvision.datasets.ImageFolder("../../data/imagenette2/train2", transform = preprocess)
+    
+def dataset_with_indices(cls):
+    """
+    Modifies the given Dataset class to return a tuple data, target, index
+    instead of just data, target.
+    """
+
+    def __getitem__(self, index):
+        data, target = cls.__getitem__(self, index)
+        return data, target, index
+
+    return type(cls.__name__, (cls,), {
+        '__getitem__': __getitem__,
+    })
+
+DatasetWIdx = dataset_with_indices(torchvision.datasets.ImageFolder)
+train_dataset = DatasetWIdx("../../data/imagenette2/train", transform = preprocess)
 train_dataset.class_to_idx = {
  'n01440764': 0,
  'n02102040': 217,
@@ -73,7 +89,7 @@ train_dataset.samples = train_dataset.make_dataset(train_dataset.root,
                                                    train_dataset.extensions, 
                                                    None)
 
-val_dataset = torchvision.datasets.ImageFolder("../../data/imagenette2/train2", transform = preprocess)
+val_dataset = torchvision.datasets.ImageFolder("../../data/imagenette2/train", transform = preprocess)
 val_dataset.class_to_idx = {
  'n01440764': 0,
  'n02102040': 217,
@@ -95,10 +111,29 @@ val_loader = torch.utils.data.DataLoader(val_dataset, shuffle=False, batch_size=
 
 
 y_table, c_table = create_default_qtables()
+# y_table = torch.ones((8,8))
+# c_table = torch.ones((8,8))
+train_acc = 0
+for (image, labels, idx) in tqdm(train_loader):
+    with torch.no_grad():
+        compressed_image = JPEGCompress(image, y_table, c_table)
+        logits = resnet(norm(compressed_image))
+        (target_class, target_dim) = return_class_name(id_classname_json, logits[-1].unsqueeze(0))
+        acc = return_class_accuracy(logits[-1].unsqueeze(0), target_dim)
+        train_acc = train_acc + (logits.argmax(dim=1) == labels).sum()
+
+print("Accuracy with default Q-Table:", train_acc/len(train_dataset))
+
+
+max_q_value = 128
+
+y_table, c_table = create_default_qtables()
 # y_table_1hot = torch.nn.functional.one_hot(y_table.type(torch.LongTensor) - 1, num_classes=255).type(torch.FloatTensor)
 # c_table_1hot = torch.nn.functional.one_hot(c_table.type(torch.LongTensor) - 1, num_classes=255).type(torch.FloatTensor)
-y_table_1hot = torch.nn.functional.one_hot(torch.ones((8,8), dtype=torch.LongTensor.dtype), num_classes=255).type(torch.FloatTensor)*10
-c_table_1hot = torch.nn.functional.one_hot(torch.ones((8,8), dtype=torch.LongTensor.dtype), num_classes=255).type(torch.FloatTensor)*10
+y_table_1hot = torch.nn.functional.one_hot(torch.ones((8,8), dtype=torch.LongTensor.dtype), 
+                                           num_classes=max_q_value-1).type(torch.FloatTensor)
+c_table_1hot = torch.nn.functional.one_hot(torch.ones((8,8), dtype=torch.LongTensor.dtype), 
+                                           num_classes=max_q_value-1).type(torch.FloatTensor) 
 
 y_table_1hot.requires_grad = True
 c_table_1hot.requires_grad = True
@@ -107,35 +142,48 @@ optimizer = torch.optim.NAdam([
     y_table_1hot, 
     c_table_1hot
 ], lr=0.1)
-lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 50, gamma = 0.9)
 
 ones_table = torch.ones((8,8))
 ones_table.requires_grad = False
 
-categorical_values_table = torch.arange(255).reshape(1,-1) + 1
+categorical_values_table = torch.arange(max_q_value-1).reshape(1,-1) + 1 
+# + 1 to avoid divide by zero errors when quantizing
 categorical_values_table.requires_grad = False
 
 # print(y_table.requires_grad)
 
-# epsilon = 0.0081 #can try out lesser values as well
-# epsilon = 1.0
 loss = torch.nn.MSELoss()
 qloss = torch.nn.MSELoss(reduction='mean')
 
-best_y_1hot = deepcopy(y_table_1hot)
+# sanity check to ensure that gradients are flowing and changing the 1 hot y_table 
+best_y_1hot = deepcopy(y_table_1hot) 
 
 best_y_table = deepcopy(y_table)
 best_c_table = deepcopy(c_table)
-best_val_loss = np.inf
+best_loss = np.inf
 
 ori_train_acc = 0.0
 
-initial_temperature = 0.3
+initial_temperature = 0.5
 temperature_anneal_rate = 0.05
-alpha = torch.tensor((1/10000000))
+
+# Hyperparam alpha to balance between maximizing Quantization and 
+# minimizing euclidean dist against uncompressed logits
+alpha = torch.tensor((1e-5)) 
 alpha.requires_grad=True
 
-for epoch in range(1000):
+logits_uncompressed = torch.zeros((len(train_dataset), resnet.fc.out_features))
+for (image, labels, idx) in tqdm(train_loader):
+    with torch.no_grad():
+        ori_logits = resnet(norm(image))
+        logits_uncompressed[idx] = ori_logits
+        (target_class, target_dim) = return_class_name(id_classname_json, ori_logits[-1].unsqueeze(0))
+        original_acc = return_class_accuracy(ori_logits[-1].unsqueeze(0), target_dim)
+        ori_train_acc = ori_train_acc + (ori_logits.argmax(dim=1) == labels).sum()
+ori_train_acc = ori_train_acc / len(train_dataset)        
+
+
+for epoch in range(100):
     running_train_loss = 0.0
     running_train_acc = 0.0
     running_val_loss = 0.0
@@ -143,30 +191,25 @@ for epoch in range(1000):
     
     temperature = max(0.001, initial_temperature*np.exp(-temperature_anneal_rate*epoch))
     
-    for (image, labels) in tqdm(train_loader):
-        with torch.no_grad():
-            ori_logits = resnet(norm(image))
-            (target_class, target_dim) = return_class_name(id_classname_json, ori_logits[-1].unsqueeze(0))
-            original_acc = return_class_accuracy(ori_logits[-1].unsqueeze(0), target_dim)
-            if epoch == 0:
-                ori_train_acc = ori_train_acc + (ori_logits.argmax(dim=1) == labels).sum()
-                
+    for (image, labels, idx) in tqdm(train_loader):
         
         # y_table = gumbel_softmax(y_table_1hot.view(1, -1, 255), temperature, True) * categorical_values_table
         # c_table = gumbel_softmax(c_table_1hot.view(1, -1, 255), temperature, True) * categorical_values_table
         
-#         y_table = torch.nn.functional.softmax(y_table_1hot.view(1, -1, 255), dim=2) * categorical_values_table
-#         c_table = torch.nn.functional.softmax(c_table_1hot.view(1, -1, 255), dim=2) * categorical_values_table
+        y_table = torch.nn.functional.softmax(y_table_1hot.view(1, -1, max_q_value-1)/temperature, dim=2) * categorical_values_table
+        c_table = torch.nn.functional.softmax(c_table_1hot.view(1, -1, max_q_value-1)/temperature, dim=2) * categorical_values_table
         
-#         y_table = y_table.sum(dim=2).reshape(8,8)
-#         c_table = c_table.sum(dim=2).reshape(8,8)
+        y_table = y_table.sum(dim=2).reshape(8,8)
+        c_table = c_table.sum(dim=2).reshape(8,8)
 
-        y_table
+        # print(y_table)
         
         compressed_image = JPEGCompress(image, y_table, c_table)
         data = norm(compressed_image)
         logits = resnet(data)
         pred = logits.argmax(dim=1)
+        
+        ori_logits = logits_uncompressed[idx]
         
         loss_minimize = loss(logits, ori_logits) #we try to minimize this loss
         loss_maximize = (- qloss(y_table, ones_table) - qloss(c_table, ones_table))
@@ -178,24 +221,82 @@ for epoch in range(1000):
         
         # print((y_table_1hot == best_y_1hot).all())
         
-        running_train_loss = running_train_loss + total_loss.detach().cpu()
+        running_train_loss = running_train_loss + total_loss.detach().cpu() * image.shape[0]
         running_train_acc = running_train_acc + (pred == labels).sum()
-    lr_scheduler.step()
             
-    if running_train_loss/len(train_dataset) < best_val_loss:
+    if running_train_loss/len(train_dataset) < best_loss:
         best_y_table = y_table
         best_c_table = c_table
-        best_val_loss = running_val_loss/len(train_dataset)
+        best_loss = running_train_loss/len(train_dataset)
         torch.save({"y_table" : y_table,
                    "c_table" : c_table,
                     "optimizer" : optimizer.state_dict(),
                    }, "best_ckpt.tar")
-    
-    if epoch == 0 :
-        ori_train_acc = ori_train_acc / len(train_dataset)
-    print("epoch {0}, training_loss: {1}, training_acc: {2}, val_loss: {3}, val_acc: {4}, ori_train_acc: {5}, logit loss: {6}, q table loss: {7}".format(
-        epoch, running_train_loss/len(train_dataset), running_train_acc/len(train_dataset),
-        running_val_loss/len(train_dataset), running_val_acc/len(train_dataset), ori_train_acc,
-        loss_minimize, loss_maximize
+        
+    if epoch % 10 == 0 and epoch > 0:
+        torch.save({"y_table" : y_table,
+           "c_table" : c_table,
+            "optimizer" : optimizer.state_dict(),
+           }, "epoch_{0}.tar".format(epoch))
+        
+    print("epoch {0}, training_loss: {1}, training_acc: {2}, ori_train_acc: {3}, logit loss: {4}, q table loss: {5}".format(
+        epoch, 
+        round(running_train_loss.item()/len(train_dataset), 5), 
+        round(running_train_acc.item()/len(train_dataset)*100, 2),
+        round(ori_train_acc.item()*100, 2),
+        round(loss_minimize.item(), 5), 
+        round(loss_maximize.item(), 5)
     ))
         
+        
+        
+y_table = torch.nn.functional.softmax(y_table_1hot.view(1, -1, 127)/temperature, dim=2) * categorical_values_table
+c_table = torch.nn.functional.softmax(c_table_1hot.view(1, -1, 127)/temperature, dim=2) * categorical_values_table
+
+y_table = y_table.sum(dim=2).reshape(8,8)
+c_table = c_table.sum(dim=2).reshape(8,8)
+
+print("y_table\n", y_table)
+print("c_table\n", c_table)
+
+
+# Calculate accuracy if y_table and c_table were integers
+y_table = y_table_1hot.argmax(dim=2)+1
+c_table = c_table_1hot.argmax(dim=2)+1
+
+train_acc = 0
+for (image, labels) in tqdm(train_loader):
+    with torch.no_grad():
+        compressed_image = JPEGCompress(image, y_table, c_table)
+        logits = resnet(norm(compressed_image))
+        (target_class, target_dim) = return_class_name(id_classname_json, logits[-1].unsqueeze(0))
+        acc = return_class_accuracy(logits[-1].unsqueeze(0), target_dim)
+        train_acc = train_acc + (logits.argmax(dim=1) == labels).sum()
+
+print("Accuracy after optimization:", train_acc/len(train_dataset))
+
+
+# check file size
+import os
+root = r"../../data/imagenette2/train"
+total_size_ori = 0
+
+for folder in os.listdir(root):
+    for file in os.listdir(os.path.join(root, folder)):
+        total_size_ori += os.stat(os.path.join(root, folder, file)).st_size
+        
+print("total size originally:", total_size_ori)
+
+qtable = {0: y_table.flatten().tolist(), 1: c_table.flatten().tolist()}
+f_buffer = BytesIO()
+total_size_aft = 0
+
+for folder in os.listdir(root):
+    for file in os.listdir(os.path.join(root, folder)):
+        im.save(f_buffer, 'JPEG', qtables=qtable)
+        total_size_aft += f_buffer.getbuffer().nbytes
+        f_buffer.seek(0)
+        f_buffer.truncate(0)
+
+print("total size after:", total_size_aft)
+print("compression_ratio:", round(total_size_aft/float(total_size_ori), 2))
