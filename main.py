@@ -19,6 +19,9 @@ from DiffJPEG import DiffJPEG
 from layers import gumbel_softmax
 from helpers import create_default_qtables, return_class_name, return_class_accuracy, visualize
 
+data_root = r"../../data/imagenette2/train"
+device = "cuda"
+
 resnet = torchvision.models.resnet50(pretrained=False) 
 #Just use pretrained = True if you can download the weights
 resnet.load_state_dict(torch.load('../weights/resnet50.pth')) 
@@ -111,29 +114,35 @@ val_loader = torch.utils.data.DataLoader(val_dataset, shuffle=False, batch_size=
 
 
 y_table, c_table = create_default_qtables()
-# y_table = torch.ones((8,8))
-# c_table = torch.ones((8,8))
+y_table, c_table = y_table.to(device), c_table.to(device)
 train_acc = 0
+
+resnet = resnet.to("cuda")
 for (image, labels, idx) in tqdm(train_loader):
     with torch.no_grad():
+        image = image.to(device)
+        labels = labels.to(device)
+        JPEGCompress = JPEGCompress.to(device)
         compressed_image = JPEGCompress(image, y_table, c_table)
-        logits = resnet(norm(compressed_image))
+        logits = resnet(norm(compressed_image).to("cuda"))
         (target_class, target_dim) = return_class_name(id_classname_json, logits[-1].unsqueeze(0))
         acc = return_class_accuracy(logits[-1].unsqueeze(0), target_dim)
-        train_acc = train_acc + (logits.argmax(dim=1) == labels).sum()
+        train_acc = train_acc + (logits.argmax(dim=1) == labels.to("cuda")).sum()
 
 print("Accuracy with default Q-Table:", train_acc/len(train_dataset))
 
 
 max_q_value = 128
 
+JPEGCompress = JPEGCompress.to(device)
+
 y_table, c_table = create_default_qtables()
 # y_table_1hot = torch.nn.functional.one_hot(y_table.type(torch.LongTensor) - 1, num_classes=255).type(torch.FloatTensor)
 # c_table_1hot = torch.nn.functional.one_hot(c_table.type(torch.LongTensor) - 1, num_classes=255).type(torch.FloatTensor)
 y_table_1hot = torch.nn.functional.one_hot(torch.ones((8,8), dtype=torch.LongTensor.dtype), 
-                                           num_classes=max_q_value-1).type(torch.FloatTensor)
+                                           num_classes=max_q_value-1).type(torch.FloatTensor).to(device)
 c_table_1hot = torch.nn.functional.one_hot(torch.ones((8,8), dtype=torch.LongTensor.dtype), 
-                                           num_classes=max_q_value-1).type(torch.FloatTensor) 
+                                           num_classes=max_q_value-1).type(torch.FloatTensor).to(device) 
 
 y_table_1hot.requires_grad = True
 c_table_1hot.requires_grad = True
@@ -143,10 +152,10 @@ optimizer = torch.optim.NAdam([
     c_table_1hot
 ], lr=0.1)
 
-ones_table = torch.ones((8,8))
+ones_table = torch.ones((8,8)).to(device)
 ones_table.requires_grad = False
 
-categorical_values_table = torch.arange(max_q_value-1).reshape(1,-1) + 1 
+categorical_values_table = torch.arange(max_q_value-1).reshape(1,-1).to(device) + 1 
 # + 1 to avoid divide by zero errors when quantizing
 categorical_values_table.requires_grad = False
 
@@ -172,8 +181,12 @@ temperature_anneal_rate = 0.05
 alpha = torch.tensor((1e-5)) 
 alpha.requires_grad=True
 
-logits_uncompressed = torch.zeros((len(train_dataset), resnet.fc.out_features))
+resnet = resnet.to(device)
+
+logits_uncompressed = torch.zeros((len(train_dataset), resnet.fc.out_features)).to(device)
 for (image, labels, idx) in tqdm(train_loader):
+    image = image.to(device)
+    labels = labels.to(device)
     with torch.no_grad():
         ori_logits = resnet(norm(image))
         logits_uncompressed[idx] = ori_logits
@@ -181,7 +194,6 @@ for (image, labels, idx) in tqdm(train_loader):
         original_acc = return_class_accuracy(ori_logits[-1].unsqueeze(0), target_dim)
         ori_train_acc = ori_train_acc + (ori_logits.argmax(dim=1) == labels).sum()
 ori_train_acc = ori_train_acc / len(train_dataset)        
-
 
 for epoch in range(100):
     running_train_loss = 0.0
@@ -191,7 +203,9 @@ for epoch in range(100):
     
     temperature = max(0.001, initial_temperature*np.exp(-temperature_anneal_rate*epoch))
     
-    for (image, labels, idx) in tqdm(train_loader):
+    for (image, labels, idx) in tqdm(train_loader):  
+        image = image.to(device)
+        labels = labels.to(device)
         
         # y_table = gumbel_softmax(y_table_1hot.view(1, -1, 255), temperature, True) * categorical_values_table
         # c_table = gumbel_softmax(c_table_1hot.view(1, -1, 255), temperature, True) * categorical_values_table
@@ -247,7 +261,7 @@ for epoch in range(100):
         round(loss_minimize.item(), 5), 
         round(loss_maximize.item(), 5)
     ))
-        
+             
         
         
 y_table = torch.nn.functional.softmax(y_table_1hot.view(1, -1, 127)/temperature, dim=2) * categorical_values_table
@@ -261,12 +275,15 @@ print("c_table\n", c_table)
 
 
 # Calculate accuracy if y_table and c_table were integers
-y_table = y_table_1hot.argmax(dim=2)+1
-c_table = c_table_1hot.argmax(dim=2)+1
+y_table = y_table_1hot.argmax(dim=2) +1
+c_table = c_table_1hot.argmax(dim=2) +1
 
 train_acc = 0
-for (image, labels) in tqdm(train_loader):
+for (image, labels, idx) in tqdm(train_loader):
     with torch.no_grad():
+        image = image.to(device)
+        labels = labels.to(device)
+        JPEGCompress = JPEGCompress.to(device)
         compressed_image = JPEGCompress(image, y_table, c_table)
         logits = resnet(norm(compressed_image))
         (target_class, target_dim) = return_class_name(id_classname_json, logits[-1].unsqueeze(0))
@@ -278,7 +295,6 @@ print("Accuracy after optimization:", train_acc/len(train_dataset))
 
 # check file size
 import os
-root = r"../../data/imagenette2/train"
 total_size_ori = 0
 
 for folder in os.listdir(root):
