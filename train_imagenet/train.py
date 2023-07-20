@@ -164,7 +164,7 @@ def load_data(root, train_csv, val_csv, cls_json, args):
             use_v2=args.use_v2,
         )
 
-    dataset_test = torchvision.datasets.ImageFolder(
+    dataset_test = CustomImageNet(
         root,
         train_csv,
         cls_json,
