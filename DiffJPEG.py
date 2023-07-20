@@ -43,7 +43,7 @@ def quality_to_factor(quality):
         quality = 5000. / quality
     else:
         quality = 200. - quality*2
-    print(quality / 100.)
+    print("quantization factor", quality / 100.)
     return quality / 100.
 
 
