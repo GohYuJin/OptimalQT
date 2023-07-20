@@ -13,6 +13,7 @@ class CustomImageNet(torchvision.datasets.VisionDataset):
         self.targets = [self.label_mapping[i.split("/")[1]] for i in self.im_paths]
         self.samples = list(zip(self.im_paths, self.targets))
         self.loader = torchvision.datasets.folder.default_loader
+        self.classes = [v[1] for v in id_classname_json.values]
                 
     def __getitem__(self, index):
         path, target = self.samples[index]
