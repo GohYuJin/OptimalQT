@@ -382,8 +382,8 @@ def get_args_parser(add_help=True):
     parser = argparse.ArgumentParser(description="PyTorch Classification Training", add_help=add_help)
 
     parser.add_argument("--data-path", default="/datasets01/imagenet_full_size/061417/", type=str, help="dataset path")
-    parser.add_argument("--train-csv", default="../imagenetHQ.csv", type=str, help="HQ Imagenet csv file")
-    parser.add_argument("--val-csv", default="../imagenetLQ.csv", type=str, help="HQ Imagenet csv file")
+    parser.add_argument("--train-csv", default="../imagenetHQ_train.csv", type=str, help="HQ Imagenet csv file")
+    parser.add_argument("--val-csv", default="../imagenetHQ_val.csv", type=str, help="HQ Imagenet csv file")
     parser.add_argument("--cls-json", default="../class_lists/imagenet_class_index.json", type=str, help="Imagenet class json mapping file")
     parser.add_argument("--model", default="resnet18", type=str, help="model name")
     parser.add_argument("--device", default="cuda", type=str, help="device (Use cuda or cpu Default: cuda)")
