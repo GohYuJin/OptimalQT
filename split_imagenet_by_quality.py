@@ -36,3 +36,13 @@ for split_folder in ["train", "val"]:
                 else:
                     LQ_files.write(rel_path + "\n")
         print("Splitting images for", split_folder, ":", idx, "/1000")
+        
+HQ_files.close()
+LQ_files.close()
+
+hq = pd.read_csv("imagenetHQ.csv", header=None)
+hq.columns = ["files"]
+hq_val = hq[hq["files"].str.startswith("val")]
+hq_val.to_csv("imagenetHQ_val.csv", index=False)
+hq_train = hq[~hq["files"].isin(hq_val["files"])]
+hq_train.to_csv("imagenetHQ_train.csv", index=False)
